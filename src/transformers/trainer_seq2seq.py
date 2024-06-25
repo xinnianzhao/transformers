@@ -294,18 +294,13 @@ class Seq2SeqTrainer(Trainer):
             generation_inputs = {
                 k: v for k, v in inputs.items() if k not in ("decoder_input_ids", "decoder_attention_mask")
             }
+        # customized for whisper
         if "decoder_attention_mask" in generation_inputs:
             generation_inputs["task"] = "transcribe"
             generation_inputs["language"] = "nl"          
-            generation_inputs.pop("labels", None)
-            if 50257 in generation_inputs["decoder_attention_mask"]:
-                # customized for whisper
-                prompt_ids = generation_inputs["decoder_input_ids"][:, :224]
-                generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
-            else:
-                # customized for whisper
-                prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(1)]
-                generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
+            # customized for whisper
+            prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(1)]
+            generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
             generation_inputs.pop("decoder_input_ids", None)
             generation_inputs.pop("decoder_attention_mask", None)
             
@@ -339,7 +334,6 @@ class Seq2SeqTrainer(Trainer):
 
         if self.args.prediction_loss_only:
             return loss, None, None
-
         if has_labels:
             labels = inputs["labels"]
             if labels.shape[-1] < gen_config.max_length:

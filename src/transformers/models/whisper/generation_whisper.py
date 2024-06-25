@@ -558,7 +558,6 @@ class WhisperGenerationMixin:
             if temperature is not None:
                 kwargs["temperature"] = temperature
             decoder_input_ids = kwargs.pop("decoder_input_ids", None)
-            decoder_attention_mask = kwargs.pop("decoder_attention_mask", None)
             if decoder_input_ids is None:
                 one_tensor = torch.ones((batch_size, 1), device=self.device, dtype=torch.long)
                 decoder_input_ids = torch.cat([t * one_tensor for t in init_tokens], dim=-1)
@@ -570,11 +569,6 @@ class WhisperGenerationMixin:
                     decoder_input_ids = torch.cat(
                         [prompt_ids[None].repeat(decoder_input_ids.shape[0], 1), decoder_input_ids], dim=-1
                     )
-            # set decoder attention mask
-            if decoder_attention_mask is None:
-                decoder_attention_mask = torch.ones_like(decoder_input_ids)
-                if 50257 in decoder_input_ids:
-                    decoder_attention_mask.masked_fill_(decoder_input_ids == 50257, 0)
 
             if kwargs.get("max_new_tokens", 0) + decoder_input_ids.shape[-1] > self.config.max_target_positions:
                 max_new_tokens = kwargs.get("max_new_tokens", 0)
@@ -586,6 +580,7 @@ class WhisperGenerationMixin:
                     "You should either reduce the length of your prompt, or reduce the value of `max_new_tokens`, "
                     f"so that their combined length is less than {self.config.max_target_positions}."
                 )
+                
             outputs = super().generate(
                 input_features,
                 generation_config=generation_config,
@@ -594,7 +589,6 @@ class WhisperGenerationMixin:
                 prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
                 synced_gpus=synced_gpus,
                 decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
                 **kwargs,
             )
             if generation_config.return_token_timestamps and hasattr(generation_config, "alignment_heads"):

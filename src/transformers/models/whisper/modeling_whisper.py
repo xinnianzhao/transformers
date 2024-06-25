@@ -24,12 +24,7 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 
 from ...activations import ACT2FN
-from ...modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask, 
-    _prepare_4d_causal_attention_mask_for_sdpa,
-    _prepare_4d_attention_mask,
-    AttentionMaskConverter,
-)
+from .attn_mask_utils_whisper import _prepare_4d_causal_attention_mask, _prepare_4d_causal_attention_mask_for_sdpa
 from ...modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
@@ -1367,26 +1362,26 @@ class WhisperDecoder(WhisperPreTrainedModel):
             input_shape = inputs_embeds.size()[:-1]
         else:
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+
         # past_key_values_length
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+  
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
-        elif self.training:
-            if self._use_sdpa and head_mask is None and not output_attentions:
-                # output_attentions=True & head_mask can not be supported when using SDPA.
-                attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
-                    attention_mask, input_shape, inputs_embeds, past_key_values_length
-                )
-            else:
-                # 4d mask is passed through the layers
-                attention_mask = _prepare_4d_causal_attention_mask(
-                    attention_mask, input_shape, inputs_embeds, past_key_values_length
-                )
+        elif self._use_sdpa and head_mask is None and not output_attentions:
+            # output_attentions=True & head_mask can not be supported when using SDPA.
+            attention_mask = _prepare_4d_causal_attention_mask_for_sdpa(
+                attention_mask, input_shape, inputs_embeds, past_key_values_length, is_training=self.training
+            )
         else:
-            attention_mask = AttentionMaskConverter._expand_mask(attention_mask, inputs_embeds.dtype, input_shape[-1])
+            # 4d mask is passed through the layers
+            attention_mask = _prepare_4d_causal_attention_mask(
+                attention_mask, input_shape, inputs_embeds, past_key_values_length
+            )
 
         # embed positionsc
         if input_ids is not None:

@@ -661,7 +661,7 @@ class GenerationMixin:
         if "token_type_ids" in model_kwargs:
             token_type_ids = model_kwargs["token_type_ids"]
             model_kwargs["token_type_ids"] = torch.cat([token_type_ids, token_type_ids[:, -1].unsqueeze(-1)], dim=-1)
-
+        # considering attention mask is none
         if not is_encoder_decoder:
             # update attention mask
             if "attention_mask" in model_kwargs:

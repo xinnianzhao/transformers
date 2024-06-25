@@ -1,16 +1,4 @@
-# Copyright 2023 The HuggingFace Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# custom attention mask utils for prompt
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -100,6 +88,7 @@ class AttentionMaskConverter:
         query_length: int,
         dtype: torch.dtype,
         key_value_length: Optional[int] = None,
+        is_training: bool = False,
     ) -> torch.Tensor:
         """
         Converts 2D attention mask to 4D attention mask by expanding mask to (bsz, head_dim=1, query_length,
@@ -107,7 +96,6 @@ class AttentionMaskConverter:
         causal, a causal mask will be added.
         """
         input_shape = (attention_mask_2d.shape[0], query_length)
-
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         causal_4d_mask = None
@@ -116,30 +104,147 @@ class AttentionMaskConverter:
                 raise ValueError(
                     "This attention mask converter is causal. Make sure to pass `key_value_length` to correctly create a causal mask."
                 )
-
             past_key_values_length = key_value_length - query_length
-            causal_4d_mask = self._make_causal_mask(
-                input_shape,
-                dtype,
-                device=attention_mask_2d.device,
-                past_key_values_length=past_key_values_length,
-                sliding_window=self.sliding_window,
-            )
+            # padding in prompt was set to 50257
+            if 50257 in attention_mask_2d:    
+                causal_4d_mask = self._make_causal_mask_with_fixed_shift(
+                    attention_mask_2d,
+                    input_shape,
+                    dtype,
+                    device=attention_mask_2d.device,
+                    past_key_values_length=past_key_values_length,
+                    sliding_window=self.sliding_window,
+                )
+                expanded_attn_mask = causal_4d_mask
+            # padding was set to -100; inference batch size is 1
+            elif -100 in attention_mask_2d:
+                causal_4d_mask = self._make_causal_mask_with_flexible_shift(
+                    attention_mask_2d,
+                    input_shape,
+                    dtype,
+                    device=attention_mask_2d.device,
+                    past_key_values_length=past_key_values_length,
+                    sliding_window=self.sliding_window,
+                )
+                expanded_attn_mask = causal_4d_mask
+            else:
+                if is_training:
+                    causal_4d_mask = self._make_causal_mask(
+                        input_shape,
+                        dtype,
+                        device=attention_mask_2d.device,
+                        past_key_values_length=past_key_values_length,
+                        sliding_window=self.sliding_window,
+                    )
+                    # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+                    expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=key_value_length).to(
+                        attention_mask_2d.device
+                    )
+                    expanded_attn_mask = causal_4d_mask.masked_fill(expanded_attn_mask.bool(), torch.finfo(dtype).min)
+                else:
+                    # special case for eval loss computation
+                    if torch.all(attention_mask_2d[:, -1] == 0):
+                        causal_4d_mask = self._make_causal_mask_with_flexible_shift(
+                            attention_mask_2d,
+                            input_shape,
+                            dtype,
+                            device=attention_mask_2d.device,
+                            past_key_values_length=past_key_values_length,
+                            sliding_window=self.sliding_window,
+                        )
+                        expanded_attn_mask = causal_4d_mask
+                    else:
+                        expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=key_value_length).to(
+                            attention_mask_2d.device
+                        )
         elif self.sliding_window is not None:
             raise NotImplementedError("Sliding window is currently only implemented for causal masking")
-
-        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-        expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=input_shape[-1]).to(
-            attention_mask_2d.device
-        )
-
-        if causal_4d_mask is not None:
-            expanded_attn_mask = causal_4d_mask.masked_fill(expanded_attn_mask.bool(), torch.finfo(dtype).min)
+        else:
+            # query_length == 1 
+            expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=input_shape[-1]).to(
+                attention_mask_2d.device
+            )         
 
         # expanded_attn_mask + causal_4d_mask can cause some overflow
         expanded_4d_mask = expanded_attn_mask
 
         return expanded_4d_mask
+
+    @staticmethod
+    def _make_causal_mask_with_fixed_shift(
+        attention_mask: torch.Tensor,
+        input_ids_shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        past_key_values_length: int = 0,
+        sliding_window: Optional[int] = None,
+    ):
+        """
+        xn:
+        Make causal mask with fixed shift.
+        Customized for prompt with fixed length.
+        """
+        bsz, tgt_len = input_ids_shape
+        # assuming half of input is prompt
+        shift = 224
+        mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+        
+        mask_diag = torch.arange(mask.size(-1), device=device)
+        mask_cond = mask_diag + shift
+        mask.masked_fill_(mask_diag < (mask_cond + 1).view(mask.size(-1), 1), 0)
+        mask = mask.to(dtype)
+        if past_key_values_length > 0:
+            mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
+            attention_mask = torch.cat([torch.zeros(tgt_len, past_key_values_length, dtype=dtype, device=device), attention_mask], dim=-1)
+
+        # add lower triangular sliding window mask if necessary
+        if sliding_window is not None:
+            raise NotImplementedError("Sliding window is currently only implemented for causal masking")
+
+        causal_4d_mask = mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+        expanded_mask = attention_mask[:, None, None, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+        mask = causal_4d_mask.masked_fill(expanded_mask.eq(50257), torch.finfo(dtype).min)
+        return mask
+
+    @staticmethod
+    def _make_causal_mask_with_flexible_shift(
+        attention_mask: torch.Tensor,
+        input_ids_shape: torch.Size,
+        dtype: torch.dtype,
+        device: torch.device,
+        past_key_values_length: int = 0,
+        sliding_window: Optional[int] = None,
+    ):
+        """
+        xn:
+        Make causal mask with flexible shift.
+        Customized for prompt with flexible length.
+        """
+        bsz, tgt_len = input_ids_shape
+        mask = torch.full((bsz, tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
+
+        for i in range(bsz):
+            mask_diag = torch.arange(mask[i].size(-1), device=device)  
+            pad_cond = torch.full((tgt_len,), tgt_len, device=device)         
+            shift = torch.sum(attention_mask[i] == 1).item()
+            pad = torch.sum(attention_mask[i] == -100).item()
+            mask_cond = mask_diag.clone() 
+            mask_cond[:shift] = shift 
+            mask_condition = mask_diag < (mask_cond + 1).view(mask[i].size(-1), 1)
+            pad_condition = mask_diag < (pad_cond - pad).view(mask[i].size(-1), 1)
+            combined_condition = torch.logical_and(mask_condition, pad_condition)
+            mask[i].masked_fill_(combined_condition, 0)
+
+            mask[i] = mask[i].to(dtype)
+
+        if past_key_values_length > 0:
+            mask = torch.cat([torch.zeros(bsz, tgt_len, past_key_values_length, dtype=dtype, device=device), mask], dim=-1)
+
+        # add lower triangular sliding window mask if necessary
+        if sliding_window is not None:
+            raise NotImplementedError("Sliding window is currently only implemented for causal masking")
+
+        return mask[:, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
 
     @staticmethod
     def _make_causal_mask(
@@ -348,6 +453,7 @@ def _prepare_4d_causal_attention_mask_for_sdpa(
     inputs_embeds: torch.Tensor,
     past_key_values_length: int,
     sliding_window: Optional[int] = None,
+    is_training: bool = False,
 ):
     """
     Prepares the correct `attn_mask` argument to be used by `torch.nn.functional.scaled_dot_product_attention`.
@@ -374,6 +480,7 @@ def _prepare_4d_causal_attention_mask_for_sdpa(
         inputs_embeds=inputs_embeds,
         past_key_values_length=past_key_values_length,
         sliding_window=sliding_window,
+        is_training=is_training,
     )
 
     if ignore_causal_mask:
@@ -394,6 +501,7 @@ def _prepare_4d_causal_attention_mask_for_sdpa(
                 input_shape[-1],
                 dtype=inputs_embeds.dtype,
                 key_value_length=key_value_length,
+                is_training=is_training,
             )
 
         # Attend to all tokens in masked rows from the causal_mask, for example the relevant first rows when

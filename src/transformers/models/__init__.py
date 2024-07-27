@@ -246,6 +246,7 @@ from . import (
     wav2vec2_with_lm,
     wavlm,
     whisper,
+    whisper_wa,
     x_clip,
     xglm,
     xlm,

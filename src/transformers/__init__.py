@@ -940,6 +940,13 @@ _import_structure = {
         "WhisperProcessor",
         "WhisperTokenizer",
     ],
+    "models.whisper_wa": [
+        "WHISPER_PRETRAINED_CONFIG_ARCHIVE_MAP",
+        "WhisperWAConfig",
+        "WhisperWAFeatureExtractor",
+        "WhisperWAProcessor",
+        "WhisperWATokenizer",
+    ],
     "models.x_clip": [
         "XCLIP_PRETRAINED_CONFIG_ARCHIVE_MAP",
         "XCLIPConfig",
@@ -1215,6 +1222,7 @@ else:
     _import_structure["models.squeezebert"].append("SqueezeBertTokenizerFast")
     _import_structure["models.t5"].append("T5TokenizerFast")
     _import_structure["models.whisper"].append("WhisperTokenizerFast")
+    _import_structure["models.whisper_wa"].append("WhisperWATokenizerFast")
     _import_structure["models.xglm"].append("XGLMTokenizerFast")
     _import_structure["models.xlm_roberta"].append("XLMRobertaTokenizerFast")
     _import_structure["models.xlnet"].append("XLNetTokenizerFast")
@@ -3621,6 +3629,16 @@ else:
             "WhisperPreTrainedModel",
         ]
     )
+    _import_structure["models.whisper_wa"].extend(
+        [
+            "WHISPER_PRETRAINED_MODEL_ARCHIVE_LIST",
+            "WhisperWAForAudioClassification",
+            "WhisperWAForCausalLM",
+            "WhisperWAForConditionalGeneration",
+            "WhisperWAModel",
+            "WhisperPreTrainedModel",
+        ]
+    )
     _import_structure["models.x_clip"].extend(
         [
             "XCLIP_PRETRAINED_MODEL_ARCHIVE_LIST",
@@ -5718,6 +5736,13 @@ if TYPE_CHECKING:
         WhisperProcessor,
         WhisperTokenizer,
     )
+    from .models.whisper_wa import (
+        WHISPER_PRETRAINED_CONFIG_ARCHIVE_MAP,
+        WhisperWAConfig,
+        WhisperWAFeatureExtractor,
+        WhisperWAProcessor,
+        WhisperWATokenizer,
+    )
     from .models.x_clip import (
         XCLIP_PRETRAINED_CONFIG_ARCHIVE_MAP,
         XCLIPConfig,
@@ -5988,6 +6013,7 @@ if TYPE_CHECKING:
         from .models.squeezebert import SqueezeBertTokenizerFast
         from .models.t5 import T5TokenizerFast
         from .models.whisper import WhisperTokenizerFast
+        from .models.whisper_wa import WhisperWATokenizerFast
         from .models.xglm import XGLMTokenizerFast
         from .models.xlm_roberta import XLMRobertaTokenizerFast
         from .models.xlnet import XLNetTokenizerFast
@@ -7988,6 +8014,14 @@ if TYPE_CHECKING:
             WhisperForCausalLM,
             WhisperForConditionalGeneration,
             WhisperModel,
+            WhisperPreTrainedModel,
+        )
+        from .models.whisper_wa import (
+            WHISPER_PRETRAINED_MODEL_ARCHIVE_LIST,
+            WhisperWAForAudioClassification,
+            WhisperWAForCausalLM,
+            WhisperWAForConditionalGeneration,
+            WhisperWAModel,
             WhisperPreTrainedModel,
         )
         from .models.x_clip import (

@@ -232,6 +232,7 @@ class WhisperPositionalEmbedding(nn.Embedding):
         super().__init__(num_positions, embedding_dim)
 
     def forward(self, input_ids, past_key_values_length=0, position_ids=None):
+
         if position_ids is None:
             return self.weight[past_key_values_length : past_key_values_length + input_ids.shape[1]]
         else:
@@ -618,6 +619,19 @@ class WhisperFlashAttention2(WhisperAttention):
 
 
 class WhisperSdpaAttention(WhisperAttention):
+    def _scaled_dot_product_attention(
+        self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None
+        ) -> torch.Tensor:
+        scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
+        attn_weights = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
+        if attn_mask is not None:
+            attn_weights += attn_mask
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights = torch.dropout(attn_weights, dropout_p, train=True)
+
+        attn_output = torch.matmul(attn_weights, value)
+        return attn_output, attn_weights
+
     # Copied from transformers.models.bart.modeling_bart.BartSdpaAttention.forward with BART->whisper, Bart->Whisper
     def forward(
         self,
@@ -632,7 +646,7 @@ class WhisperSdpaAttention(WhisperAttention):
         if output_attentions or layer_head_mask is not None:
             # TODO: Improve this warning with e.g. `model.config._attn_implementation = "manual"` once this is implemented.
             logger.warning_once(
-                "WhisperModel is using WhisperSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` or `layer_head_mask` not None. Falling back to the manual attention"
+                "WhisperWAModel is using WhisperSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` or `layer_head_mask` not None. Falling back to the manual attention"
                 ' implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
             return super().forward(
@@ -693,16 +707,28 @@ class WhisperSdpaAttention(WhisperAttention):
 
         # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
         # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=attention_mask,
-            dropout_p=self.dropout if self.training else 0.0,
-            # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
-            is_causal=self.is_causal and attention_mask is None and tgt_len > 1,
-        )
-
+        if not is_cross_attention:
+            attn_output = F.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
+                is_causal=self.is_causal and attention_mask is None and tgt_len > 1,
+            )
+            attn_weights = None
+        else:
+            attn_output, attn_weights = self._scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.dropout if self.training else 0.0,
+                # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
+                is_causal=self.is_causal and attention_mask is None and tgt_len > 1,
+            )
+            
         if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
@@ -717,6 +743,94 @@ class WhisperSdpaAttention(WhisperAttention):
 
         attn_output = self.out_proj(attn_output)
 
+        return attn_output, attn_weights, past_key_value
+
+
+class WhisperWeightedSdpaAttention(WhisperAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        layer_head_mask: Optional[torch.Tensor] = None,
+        relevance_score: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        """Input shape: Batch x Time x Channel"""
+        if output_attentions or layer_head_mask is not None:
+            # TODO: Improve this warning with e.g. `model.config._attn_implementation = "manual"` once this is implemented.
+            logger.warning_once(
+                "WhisperWAModel is using WhisperSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True` or `layer_head_mask` not None. Falling back to the manual attention"
+                ' implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+            return super().forward(
+                hidden_states,
+                past_key_value=past_key_value,
+                attention_mask=attention_mask,
+                layer_head_mask=layer_head_mask,
+                relevance_score=relevance_score,
+                output_attentions=output_attentions,
+            )
+
+        bsz, tgt_len, _ = hidden_states.size()
+
+        # get query proj
+        query_states = self.q_proj(hidden_states)
+        # get key, value proj
+        # `past_key_value[0].shape[2] == key_value_states.shape[1]`
+        # is checking that the `sequence_length` of the `past_key_value` is the same as
+        # the provided `key_value_states` to support prefix tuning
+
+        if past_key_value is not None:
+            # reuse k, v, self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+        else:
+            # self_attention
+            key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
+            value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+
+        ## Apply relevance scores
+        ## if relevance score is None during inference, past weighted key/value_states are used
+        if relevance_score is not None:
+            key_states = key_states * relevance_score.unsqueeze(-1)
+            value_states = value_states * relevance_score.unsqueeze(-1)
+
+        # if self.is_decoder: 
+        # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
+        # all previous decoder key/value_states. Further calls to uni-directional self-attention
+        # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
+        past_key_value = (key_states, value_states)
+
+        query_states = self._shape(query_states, tgt_len, bsz)
+
+        # NOTE: SDPA with memory-efficient backend is currently (torch==2.1.2) bugged when using non-contiguous inputs and a custom attn_mask,
+        # but we are fine here as `_shape` do call `.contiguous()`. Reference: https://github.com/pytorch/pytorch/issues/112577
+        attn_output = F.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            attn_mask=attention_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            # The tgt_len > 1 is necessary to match with AttentionMaskConverter.to_causal_4d that does not create a causal mask in case tgt_len == 1.
+            is_causal=self.is_causal and attention_mask is None and tgt_len > 1,
+        )
+          
+        if attn_output.size() != (bsz, self.num_heads, tgt_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        attn_output = attn_output.transpose(1, 2)
+
+        # Use the `embed_dim` from the config (stored in the class) rather than `hidden_state` because `attn_output` can be
+        # partitioned across GPUs when using tensor-parallelism.
+        attn_output = attn_output.reshape(bsz, tgt_len, self.embed_dim)
+
+        attn_output = self.out_proj(attn_output)
         return attn_output, None, past_key_value
 
 
@@ -804,7 +918,7 @@ class WhisperDecoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.d_model
 
-        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
+        self.self_attn = WhisperWeightedSdpaAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             dropout=config.attention_dropout,
@@ -829,6 +943,18 @@ class WhisperDecoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
+    def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
+        # Add a small value to attention_weights to avoid log(0)
+        entropy = -torch.sum(cross_attention_weights * torch.log(cross_attention_weights + 1e-10), dim=-1)
+        relevance_score = 1 / (entropy + 1e-10)  # Inverse of entropy  
+        if decoder_attention_mask is not None: 
+            mask = decoder_attention_mask[:, :, 0, :]
+            mask = mask.repeat(1, relevance_score.size(1), 1)   
+            relevance_score[mask != 0] = 1
+        else:
+            relevance_score[:, :, :-4] = 1
+        return relevance_score
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -838,6 +964,7 @@ class WhisperDecoderLayer(nn.Module):
         layer_head_mask: Optional[torch.Tensor] = None,
         cross_attn_layer_head_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        relevance_score: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = True,
     ) -> torch.Tensor:
@@ -865,12 +992,26 @@ class WhisperDecoderLayer(nn.Module):
         # Self Attention
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+
+        # precompute relevance scores for the first layer
+        if relevance_score is None and encoder_hidden_states is not None and self_attn_past_key_value is None:
+            _, cross_attn_weights, _= self.encoder_attn(
+                hidden_states=hidden_states,
+                key_value_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+                layer_head_mask=cross_attn_layer_head_mask,
+                past_key_value=None,
+                output_attentions=output_attentions,
+            )
+            relevance_score = self._compute_relevance_score(cross_attn_weights, attention_mask)
+
         # add present self-attn cache to positions 1,2 of present_key_value tuple
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             past_key_value=self_attn_past_key_value,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
+            relevance_score=relevance_score,
             output_attentions=output_attentions,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
@@ -893,6 +1034,10 @@ class WhisperDecoderLayer(nn.Module):
                 past_key_value=cross_attn_past_key_value,
                 output_attentions=output_attentions,
             )
+            # Compute relevance scores, keep the same for one sentence
+            if hidden_states.size(1) != 1:
+                relevance_score = self._compute_relevance_score(cross_attn_weights, attention_mask)
+
             hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
             hidden_states = residual + hidden_states
 
@@ -916,7 +1061,7 @@ class WhisperDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
 
-        return outputs
+        return outputs, relevance_score
 
 
 class WhisperPreTrainedModel(PreTrainedModel):
@@ -1413,6 +1558,8 @@ class WhisperDecoder(WhisperPreTrainedModel):
                     f"The `{mask_name}` should be specified for {len(self.layers)} layers, but it is for"
                     f" {head_mask.size()[0]}."
                 )
+
+        relevance_score = None
         for idx, decoder_layer in enumerate(self.layers):
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             if output_hidden_states:
@@ -1421,11 +1568,11 @@ class WhisperDecoder(WhisperPreTrainedModel):
                 dropout_probability = torch.rand([])
                 if dropout_probability < self.layerdrop:
                     continue
-
+                    
             past_key_value = past_key_values[idx] if past_key_values is not None else None
 
             if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
+                layer_outputs, relevance_score = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
                     hidden_states,
                     attention_mask,
@@ -1434,11 +1581,12 @@ class WhisperDecoder(WhisperPreTrainedModel):
                     head_mask[idx] if head_mask is not None else None,
                     cross_attn_head_mask[idx] if cross_attn_head_mask is not None else None,
                     None,  # past_key_value
+                    relevance_score, # relevance_score
                     output_attentions,
                     use_cache,
                 )
             else:
-                layer_outputs = decoder_layer(
+                layer_outputs, relevance_score = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     encoder_hidden_states=encoder_hidden_states,
@@ -1448,8 +1596,10 @@ class WhisperDecoder(WhisperPreTrainedModel):
                     ),
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
+                    relevance_score=relevance_score,
                     use_cache=use_cache,
                 )
+
             hidden_states = layer_outputs[0]
 
             if use_cache:
@@ -1583,10 +1733,10 @@ class WhisperWAModel(WhisperPreTrainedModel):
         Example:
          ```python
          >>> import torch
-         >>> from transformers import AutoFeatureExtractor, WhisperModel
+         >>> from transformers import AutoFeatureExtractor, WhisperWAModel
          >>> from datasets import load_dataset
 
-         >>> model = WhisperModel.from_pretrained("openai/whisper-base")
+         >>> model = WhisperWAModel.from_pretrained("openai/whisper-base")
          >>> feature_extractor = AutoFeatureExtractor.from_pretrained("openai/whisper-base")
          >>> ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
          >>> inputs = feature_extractor(ds[0]["audio"]["array"], return_tensors="pt")
@@ -1662,7 +1812,7 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperPreTrai
 
     def __init__(self, config: WhisperWAConfig):
         super().__init__(config)
-        self.model = WhisperModel(config)
+        self.model = WhisperWAModel(config)
         self.proj_out = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         # Initialize weights and apply final processing
@@ -1801,7 +1951,10 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperPreTrai
     ):
         decoder_position_ids = None
         if decoder_attention_mask is not None:
-            decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
+            if 50257 in decoder_attention_mask:
+                decoder_position_ids = torch.arange(decoder_attention_mask.size(1)).repeat(decoder_attention_mask.size(0), 1)
+            else:
+                decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
 
         if past_key_values is not None:
             past_length = past_key_values[0][0].shape[2]

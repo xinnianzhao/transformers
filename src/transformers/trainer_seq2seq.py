@@ -298,11 +298,14 @@ class Seq2SeqTrainer(Trainer):
             generation_inputs["task"] = "transcribe"
             generation_inputs["language"] = "nl"          
             # customized for whisper
-            prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(1)]
-            generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
+            if 50257 in generation_inputs["decoder_attention_mask"]:
+                generation_inputs["prompt_ids"] = generation_inputs["decoder_input_ids"][:, :224]
+            else:
+                prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(1)]
+                generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
             generation_inputs.pop("decoder_input_ids", None)
             generation_inputs.pop("decoder_attention_mask", None)
-            
+                    
         generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
 
         # Temporary hack to ensure the generation config is not initialized for each iteration of the evaluation loop

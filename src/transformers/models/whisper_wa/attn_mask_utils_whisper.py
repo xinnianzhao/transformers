@@ -485,7 +485,7 @@ def _prepare_4d_causal_attention_mask_for_sdpa(
         if attention_mask is None:
             expanded_4d_mask = None
         else:
-            expanded_4d_mask = attn_mask_converter.expand_mask(attention_mask, dtype=inputs_embeds.dtype, tgt_len=key_value_length)
+            expanded_4d_mask = attn_mask_converter._expand_mask(attention_mask, dtype=inputs_embeds.dtype, tgt_len=key_value_length)
     elif attention_mask is None:
         expanded_4d_mask = attn_mask_converter.to_causal_4d(
             input_shape[0], input_shape[-1], key_value_length, dtype=inputs_embeds.dtype, device=inputs_embeds.device

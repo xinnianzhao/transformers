@@ -572,7 +572,7 @@ class GenerationMixin:
             and (decoder_input_ids[:, 0] != decoder_start_token_id[:, 0]).all().item()
         ):
             decoder_input_ids = torch.cat([decoder_input_ids_start, decoder_input_ids], dim=-1)
-            if "decoder_attention_mask" in model_kwargs:
+            if "decoder_attention_mask" in model_kwargs and model_kwargs["decoder_attention_mask"] is not None:
                 decoder_attention_mask = model_kwargs["decoder_attention_mask"]
                 decoder_attention_mask = torch.cat(
                     (torch.ones_like(decoder_attention_mask)[:, :1], decoder_attention_mask),

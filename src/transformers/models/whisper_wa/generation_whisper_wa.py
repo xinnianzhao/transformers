@@ -570,6 +570,12 @@ class WhisperWAGenerationMixin:
                         [prompt_ids[None].repeat(decoder_input_ids.shape[0], 1), decoder_input_ids], dim=-1
                     )
 
+            if 50257 in decoder_input_ids:
+                decoder_attention_mask = torch.ones_like(decoder_input_ids)
+                decoder_attention_mask[decoder_input_ids == 50257] = 50257
+            else:
+                decoder_attention_mask = None
+
             if kwargs.get("max_new_tokens", 0) + decoder_input_ids.shape[-1] > self.config.max_target_positions:
                 max_new_tokens = kwargs.get("max_new_tokens", 0)
                 raise ValueError(
@@ -589,6 +595,7 @@ class WhisperWAGenerationMixin:
                 prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
                 synced_gpus=synced_gpus,
                 decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
                 **kwargs,
             )
             if generation_config.return_token_timestamps and hasattr(generation_config, "alignment_heads"):
@@ -1500,7 +1507,6 @@ class WhisperWAGenerationMixin:
         kwargs,
     ):
         cut_off_length = config.max_target_positions // 2 - 1
-
         one_tensor = torch.ones((cur_bsz, 1), device=device, dtype=torch.long)
         decoder_input_ids = torch.cat([t * one_tensor for t in init_tokens], dim=-1)
 

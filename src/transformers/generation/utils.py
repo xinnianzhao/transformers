@@ -560,7 +560,7 @@ class GenerationMixin:
         # exception: Donut checkpoints have task-specific decoder starts and don't expect a BOS token
         elif self.config.model_type == "vision-encoder-decoder" and "donut" in self.name_or_path.lower():
             pass
-        elif self.config.model_type in ["whisper"]:
+        elif self.config.model_type in ["whisper", "whisper_wa"]:
             pass
         # user input but doesn't start with decoder_start_token_id -> prepend decoder_start_token_id (and adjust
         # decoder_attention_mask if provided)
@@ -2454,7 +2454,6 @@ class GenerationMixin:
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
-
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:

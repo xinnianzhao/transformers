@@ -652,6 +652,7 @@ class WhisperSdpaAttention(WhisperAttention):
 
         # get query proj
         query_states = self.q_proj(hidden_states)
+
         # get key, value proj
         # `past_key_value[0].shape[2] == key_value_states.shape[1]`
         # is checking that the `sequence_length` of the `past_key_value` is the same as
@@ -1368,7 +1369,7 @@ class WhisperDecoder(WhisperPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-  
+
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
@@ -1382,7 +1383,6 @@ class WhisperDecoder(WhisperPreTrainedModel):
             attention_mask = _prepare_4d_causal_attention_mask(
                 attention_mask, input_shape, inputs_embeds, past_key_values_length
             )
-
         # embed positionsc
         if input_ids is not None:
             positions = self.embed_positions(
@@ -1413,6 +1413,7 @@ class WhisperDecoder(WhisperPreTrainedModel):
                     f"The `{mask_name}` should be specified for {len(self.layers)} layers, but it is for"
                     f" {head_mask.size()[0]}."
                 )
+
         for idx, decoder_layer in enumerate(self.layers):
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             if output_hidden_states:
@@ -1801,7 +1802,10 @@ class WhisperForConditionalGeneration(WhisperGenerationMixin, WhisperPreTrainedM
     ):
         decoder_position_ids = None
         if decoder_attention_mask is not None:
-            decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
+            if decoder_attention_mask.shape[0] == 1:
+                decoder_position_ids = None
+            else:
+                decoder_position_ids = (decoder_attention_mask.cumsum(-1) - 1).clamp(min=0)
 
         if past_key_values is not None:
             past_length = past_key_values[0][0].shape[2]

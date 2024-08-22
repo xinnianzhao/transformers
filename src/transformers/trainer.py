@@ -980,7 +980,6 @@ class Trainer:
         Trainer's init through `optimizers`, or subclass and override this method in a subclass.
         """
         opt_model = self.model_wrapped if is_sagemaker_mp_enabled() else self.model
-
         if self.optimizer is None:
             decay_parameters = self.get_decay_parameter_names(opt_model)
             optimizer_grouped_parameters = [
@@ -1746,7 +1745,6 @@ class Trainer:
                 self.state.save_steps = math.ceil(max_steps * args.save_steps)
             else:
                 self.state.save_steps = args.save_steps
-
         # Activate gradient checkpointing if needed
         if args.gradient_checkpointing:
             if args.gradient_checkpointing_kwargs is None:
@@ -1958,7 +1956,6 @@ class Trainer:
 
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
-
                 with self.accelerator.accumulate(model):
                     tr_loss_step = self.training_step(model, inputs)
 
@@ -2014,7 +2011,6 @@ class Trainer:
                             grad_norm = model.get_global_grad_norm()
                         else:
                             grad_norm = _grad_norm.item() if _grad_norm is not None else None
-
                     # Optimizer step
                     self.optimizer.step()
                     optimizer_was_run = not self.accelerator.optimizer_step_was_skipped
@@ -2932,7 +2928,6 @@ class Trainer:
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
             self._past = outputs[self.args.past_index]
-
         if labels is not None:
             unwrapped_model = unwrap_model(model)
             if _is_peft_model(unwrapped_model):

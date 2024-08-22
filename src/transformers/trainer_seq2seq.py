@@ -282,6 +282,7 @@ class Seq2SeqTrainer(Trainer):
             gen_kwargs["synced_gpus"] if gen_kwargs.get("synced_gpus") is not None else default_synced_gpus
         )
         generation_inputs = inputs.copy()
+
         # If the `decoder_input_ids` was created from `labels`, evict the former, so that the model can freely generate
         # (otherwise, it would continue generating from the padded `decoder_input_ids`)
         if (
@@ -294,18 +295,17 @@ class Seq2SeqTrainer(Trainer):
                 k: v for k, v in inputs.items() if k not in ("decoder_input_ids", "decoder_attention_mask")
             }
         # customized for whisper
-        if "decoder_attention_mask" in generation_inputs:
+        elif "decoder_attention_mask" in generation_inputs:
             generation_inputs["task"] = "transcribe"
             generation_inputs["language"] = "nl"          
             # customized for whisper
             if 50257 in generation_inputs["decoder_attention_mask"]:
                 generation_inputs["prompt_ids"] = generation_inputs["decoder_input_ids"][:, :224]
             else:
-                prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(1)]
+                prompt_ids = generation_inputs["decoder_input_ids"][generation_inputs["decoder_attention_mask"].eq(0)]
                 generation_inputs["prompt_ids"] = prompt_ids.clone().detach()
             generation_inputs.pop("decoder_input_ids", None)
-            generation_inputs.pop("decoder_attention_mask", None)
-                    
+            
         generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
 
         # Temporary hack to ensure the generation config is not initialized for each iteration of the evaluation loop

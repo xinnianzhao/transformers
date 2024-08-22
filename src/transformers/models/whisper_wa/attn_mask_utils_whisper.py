@@ -99,13 +99,13 @@ class AttentionMaskConverter:
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         causal_4d_mask = None
-        if (input_shape[-1] > 1 or self.sliding_window is not None) and self.is_causal:
+        # if (input_shape[-1] > 1 or self.sliding_window is not None) and self.is_causal:
+        if self.is_causal:
             if key_value_length is None:
                 raise ValueError(
                     "This attention mask converter is causal. Make sure to pass `key_value_length` to correctly create a causal mask."
                 )
             past_key_values_length = key_value_length - query_length
-            # batch size > 1
             # padding in prompt was set to 50257
             if 50257 in attention_mask_2d:    
                 causal_4d_mask = self._make_causal_mask_with_fixed_shift(
@@ -117,7 +117,7 @@ class AttentionMaskConverter:
                     sliding_window=self.sliding_window,
                 )
                 expanded_attn_mask = causal_4d_mask
-            # padding was set to -100; inference batch size is 1
+            # batch_size > 1; padding was set to -100
             elif -100 in attention_mask_2d:
                 causal_4d_mask = self._make_causal_mask_with_flexible_shift(
                     attention_mask_2d,
@@ -143,7 +143,7 @@ class AttentionMaskConverter:
                         attention_mask_2d.device
                     )
                     expanded_attn_mask = causal_4d_mask.masked_fill(expanded_attn_mask.bool(), torch.finfo(dtype).min)
-                # batch size == 1, no -100 padding, eval loss computation
+                # batch size == 1, no -100 padding
                 else:
                     causal_4d_mask = self._make_causal_mask_with_flexible_shift(
                         attention_mask_2d,
@@ -157,11 +157,11 @@ class AttentionMaskConverter:
 
         elif self.sliding_window is not None:
             raise NotImplementedError("Sliding window is currently only implemented for causal masking")
-        else:
-            # query_length == 1 
-            expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=input_shape[-1]).to(
-                attention_mask_2d.device
-            )         
+        # else:
+        #     # query_length == 1 
+        #     expanded_attn_mask = self._expand_mask(attention_mask_2d, dtype, tgt_len=input_shape[-1]).to(
+        #         attention_mask_2d.device
+        #     )         
 
         # expanded_attn_mask + causal_4d_mask can cause some overflow
         expanded_4d_mask = expanded_attn_mask
@@ -224,7 +224,7 @@ class AttentionMaskConverter:
         for i in range(bsz):
             mask_diag = torch.arange(mask[i].size(-1), device=device)  
             pad_cond = torch.full((tgt_len,), tgt_len, device=device)         
-            shift = torch.sum(attention_mask[i] == 1).item()
+            shift = torch.sum(attention_mask[i] == 0).item()
             pad = torch.sum(attention_mask[i] == -100).item()
             mask_cond = mask_diag.clone() 
             mask_cond[:shift] = shift 
@@ -418,7 +418,7 @@ def _prepare_4d_causal_attention_mask(
     attn_mask_converter = AttentionMaskConverter(is_causal=True, sliding_window=sliding_window)
 
     key_value_length = input_shape[-1] + past_key_values_length
-
+    
     # 4d mask is passed through the layers
     if attention_mask is not None and len(attention_mask.shape) == 2:
         attention_mask = attn_mask_converter.to_4d(
@@ -440,6 +440,8 @@ def _prepare_4d_causal_attention_mask(
         attention_mask = attn_mask_converter.to_causal_4d(
             input_shape[0], input_shape[-1], key_value_length, dtype=inputs_embeds.dtype, device=inputs_embeds.device
         )
+        # attention_mask = attn_mask_converter._expand_mask(attention_mask, dtype=inputs_embeds.dtype, tgt_len=key_value_length)
+        # attention_mask = None
 
     return attention_mask
 

@@ -571,7 +571,9 @@ class WhisperGenerationMixin:
                         [prompt_ids[None].repeat(decoder_input_ids.shape[0], 1), decoder_input_ids], dim=-1
                     )
 
-            decoder_attention_mask = decoder_attention_mask[: , :decoder_input_ids.shape[-1]]
+            if decoder_attention_mask is not None:
+                decoder_attention_mask = decoder_attention_mask[: , :decoder_input_ids.shape[-1]]
+
 
             if kwargs.get("max_new_tokens", 0) + decoder_input_ids.shape[-1] > self.config.max_target_positions:
                 max_new_tokens = kwargs.get("max_new_tokens", 0)

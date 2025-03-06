@@ -334,8 +334,8 @@ class WhisperWAAttention(nn.Module):
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_states, value_states)
 
-        # ps: relevance score to rescale the key and value states
-        if self.is_decoder and relevance_score is not None:
+        # ps: relevance score to rescale the key and value states in self-attention of decoder
+        if self.is_decoder and not is_cross_attention and relevance_score is not None:
             key_states = key_states * relevance_score.unsqueeze(-1)
             value_states = value_states * relevance_score.unsqueeze(-1)
 
@@ -837,28 +837,30 @@ class WhisperWADecoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
-    # def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
-    #     if cross_attention_weights.shape[-2] != 1 and decoder_attention_mask is not None:
-    #         entropy = -torch.sum(cross_attention_weights * torch.log(cross_attention_weights + 1e-10), dim=-1) # Add a small value to attention_weights to avoid log(0)
-    #         inverse_entropy = 1 / entropy
-    #         # relevance_score = torch.exp(-entropy)
-    #         # log_entropy = torch.log1p(entropy) # log1p(x) = log(1 + x) to avoid log(0)
-    #         # relevance_score = 10 * (1 - log_entropy / torch.max(entropy))  # Normalized entropy
-    #         relevance_score = inverse_entropy / (inverse_entropy.max() - inverse_entropy.min())
-    #         import pdb; pdb.set_trace()
-    #         mask = decoder_attention_mask[:, :, 0, :]
-    #         mask = mask.repeat(1, entropy.size(1), 1)   
-    #         # relevance_score = -entropy + mask
-    #         # relevance_score = torch.softmax(relevance_score, dim=-1)
-    #         relevance_score[mask != 0] = 1
-    #     else:
-    #         relevance_score = None
-    #     return relevance_score
+    def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
+        if cross_attention_weights.shape[-2] != 1 and decoder_attention_mask is not None:
+            entropy = -torch.sum(cross_attention_weights * torch.log(cross_attention_weights + 1e-10), dim=-1) # Add a small value to attention_weights to avoid log(0)
+            inverse_entropy = 1 / entropy
+            # relevance_score = torch.exp(-entropy)
+            # log_entropy = torch.log1p(entropy) # log1p(x) = log(1 + x) to avoid log(0)
+            # relevance_score = 10 * (1 - log_entropy / torch.max(entropy))  # Normalized entropy
+            relevance_score = inverse_entropy / (inverse_entropy.max() - inverse_entropy.min())
+            # import pdb; pdb.set_trace()
+            mask = decoder_attention_mask[:, :, 0, :]
+            mask = mask.repeat(1, entropy.size(1), 1)   
+            # relevance_score = -entropy + mask
+            # relevance_score = torch.softmax(relevance_score, dim=-1)
+            relevance_score[mask != 0] = 1
+        else:
+            relevance_score = None
+        return relevance_score
 
     # def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
     #     # max weight
     #     if cross_attention_weights.shape[-2] != 1 and decoder_attention_mask is not None:
-    #         relevance_score = 2.5 * torch.max(cross_attention_weights, dim=-1).values 
+    #         # scale relevance score
+    #         # import pdb; pdb.set_trace()
+    #         relevance_score = torch.max(cross_attention_weights, dim=-1).values 
     #         mask = decoder_attention_mask[:, :, 0, :]
     #         mask = mask.repeat(1, cross_attention_weights.size(1), 1)
     #         relevance_score[mask != 0] = 1
@@ -867,22 +869,28 @@ class WhisperWADecoderLayer(nn.Module):
     #         relevance_score = None
     #     return relevance_score
 
-    def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
-        # gini coefficient
-        if cross_attention_weights.shape[-2] != 1 and decoder_attention_mask is not None:
-            speech_length = cross_attention_weights.size(-1)
-            sorted_weights, _ = torch.sort(cross_attention_weights, dim=-1)
-            cumulative_weights = torch.cumsum(sorted_weights, dim=-1)
-            indices = torch.arange(1, speech_length + 1, dtype=cross_attention_weights.dtype, device=cross_attention_weights.device)
-            relevance_score = (2 * torch.sum(indices * sorted_weights, dim=-1)) / (speech_length * sorted_weights.sum(dim=-1)) - (speech_length + 1) / speech_length
-            relevance_score = relevance_score
-            mask = decoder_attention_mask[:, :, 0, :]
-            mask = mask.repeat(1, cross_attention_weights.size(1), 1)
-            relevance_score[mask != 0] = 1
-        else:
-            # ps: tgt_len == 1, scaled k,v states have saved in past_key_value
-            relevance_score = None
-        return relevance_score
+    # def _compute_relevance_score(self, cross_attention_weights, decoder_attention_mask):
+    #     # gini coefficient
+    #     if cross_attention_weights.shape[-2] != 1 and decoder_attention_mask is not None:
+    #         batch_size, num_heads, query_length, speech_length = cross_attention_weights.size()
+    #         # compute cross-attention-weights over all heads
+    #         cross_attention_weights = torch.mean(cross_attention_weights, dim=1, keepdim=True) 
+    #         cross_attention_weights = cross_attention_weights.expand(-1, num_heads, -1, -1)
+
+    #         sorted_weights, _ = torch.sort(cross_attention_weights, dim=-1)
+    #         # cumulative_weights = torch.cumsum(sorted_weights, dim=-1)
+    #         indices = torch.arange(1, speech_length + 1, dtype=cross_attention_weights.dtype, device=cross_attention_weights.device)
+    #         relevance_score = (2 * torch.sum(indices * sorted_weights, dim=-1)) / (speech_length * sorted_weights.sum(dim=-1)) - (speech_length + 1) / speech_length
+    #         # scale relevance score
+    #         import pdb; pdb.set_trace() 
+    #         relevance_score =  relevance_score
+    #         mask = decoder_attention_mask[:, :, 0, :]
+    #         mask = mask.repeat(1, cross_attention_weights.size(1), 1)
+    #         relevance_score[mask != 0] = 1
+    #     else:
+    #         # ps: tgt_len == 1, scaled k,v states have saved in past_key_value
+    #         relevance_score = None
+    #     return relevance_score
 
     def forward(
         self,
@@ -1357,6 +1365,8 @@ class WhisperWADecoder(WhisperWAPreTrainedModel):
         past_key_values=None,
         inputs_embeds=None,
         position_ids=None,
+        coefficient_wa=None,
+        effect_layer=None,
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
@@ -1531,14 +1541,22 @@ class WhisperWADecoder(WhisperWAPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                 )
-
+                
             if idx == 0:
-                cached_score = layer_outputs[-1]   
-            if idx == len(self.layers) - 1:
-                relevance_score = cached_score
-            else:
-                relevance_score = None
-            # relevance_score = layer_outputs[-1]
+                cached_score = layer_outputs[-1]  
+            if effect_layer is not None: 
+                # apply on an effect layer
+                if idx == effect_layer:
+                    relevance_score = coefficient_wa * cached_score if cached_score is not None else None
+                else:
+                    relevance_score = None
+            else: 
+                # apply on all layers
+                # relevance_score = coefficient_wa * layer_outputs[-1] if layer_outputs[-1] is not None else None
+                relevance_score = coefficient_wa * cached_score if cached_score is not None else None
+                # not apply to any layer
+                # relevance_score = None
+           
             hidden_states = layer_outputs[0]
 
             if use_cache:
@@ -1661,6 +1679,8 @@ class WhisperWAModel(WhisperWAPreTrainedModel):
         past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[Tuple[torch.FloatTensor]] = None,
         decoder_position_ids: Optional[Tuple[torch.LongTensor]] = None,
+        decoder_effect_layer: Optional[int] = None,
+        decoder_coefficient_wa: Optional[float] = 1.0,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -1720,6 +1740,8 @@ class WhisperWAModel(WhisperWAPreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=decoder_inputs_embeds,
             position_ids=decoder_position_ids,
+            effect_layer=decoder_effect_layer,
+            coefficient_wa=decoder_coefficient_wa,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -1794,6 +1816,8 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperWAPreTr
         past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         decoder_inputs_embeds: Optional[Tuple[torch.FloatTensor]] = None,
         decoder_position_ids: Optional[Tuple[torch.LongTensor]] = None,
+        decoder_effect_layer: Optional[int] = None,
+        decoder_coefficient_wa: Optional[float] = 1.0,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -1836,7 +1860,7 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperWAPreTr
                 decoder_input_ids = shift_tokens_right(
                     labels, self.config.pad_token_id, self.config.decoder_start_token_id
                 )
-
+        
         outputs = self.model(
             input_features,
             attention_mask=attention_mask,
@@ -1849,6 +1873,8 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperWAPreTr
             past_key_values=past_key_values,
             decoder_inputs_embeds=decoder_inputs_embeds,
             decoder_position_ids=decoder_position_ids,
+            decoder_coefficient_wa=decoder_coefficient_wa,
+            decoder_effect_layer=decoder_effect_layer,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -1910,6 +1936,10 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperWAPreTr
             if decoder_position_ids is not None and decoder_position_ids.shape[1] > decoder_input_ids.shape[1]:
                 decoder_position_ids = decoder_position_ids[:, remove_prefix_length:]
 
+        # initial effect_layer and coefficient_wa
+        decoder_effect_layer = kwargs["decoder_effect_layer"]
+        decoder_coefficient_wa = kwargs["decoder_coefficient_wa"]
+
         return {
             "encoder_outputs": encoder_outputs,
             "past_key_values": past_key_values,
@@ -1917,6 +1947,8 @@ class WhisperWAForConditionalGeneration(WhisperWAGenerationMixin, WhisperWAPreTr
             "use_cache": use_cache,
             "decoder_attention_mask": decoder_attention_mask,
             "decoder_position_ids": decoder_position_ids,
+            "decoder_effect_layer": decoder_effect_layer,
+            "decoder_coefficient_wa": decoder_coefficient_wa,
         }
 
     @staticmethod
